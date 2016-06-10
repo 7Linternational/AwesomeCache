@@ -91,6 +91,38 @@ public class Cache<T: NSCoding> {
 		}
 	}
 	
+	  // MARK: Dictionary functions
+
+  /// Returns the cache current state as a dictionary
+  public func asDictionary() -> [String: T] {
+    return self.dictionaryWithValuesForKeys(keysForObjects: self.allKeys())
+  }
+
+  /// Returns values for keys, if object is expired nil is returned for key
+  public func dictionaryWithValuesForKeys(keysForNullableObjects keys: [String]) -> [String: T?] {
+    var dictionary = [String: T?]()
+
+    for key in keys {
+      dictionary[key] = self.objectForKey(key)
+    }
+
+    return dictionary
+  }
+
+  /// Returns values for keys, if object is expired key will not be added to dictionary (null-safety)
+  public func dictionaryWithValuesForKeys(keysForObjects keys: [String]) -> [String: T] {
+    var dictionary = [String: T]()
+
+    for key in keys {
+      if let value = self.objectForKey(key) {
+        dictionary[key] = value
+      }
+    }
+
+    return dictionary
+  }
+
+	
 	
 	// MARK: Get object
 	
@@ -272,7 +304,7 @@ public class Cache<T: NSCoding> {
 	
 	// MARK: Private Helper
     
-    private func allKeys() -> [String] {
+    public func allKeys() -> [String] {
         let urls = try? self.fileManager.contentsOfDirectoryAtURL(self.cacheDirectory, includingPropertiesForKeys: nil, options: [])
         return urls?.flatMap { $0.URLByDeletingPathExtension?.lastPathComponent } ?? []
     }
