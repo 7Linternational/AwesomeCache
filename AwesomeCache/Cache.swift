@@ -22,31 +22,43 @@ public class Cache<T: NSCoding> {
 	private let fileManager = NSFileManager()
 	private let diskWriteQueue: dispatch_queue_t = dispatch_queue_create("com.aschuch.cache.diskWriteQueue", DISPATCH_QUEUE_SERIAL)
 	private let diskReadQueue: dispatch_queue_t = dispatch_queue_create("com.aschuch.cache.diskReadQueue", DISPATCH_QUEUE_SERIAL)
-	
+	private let queue = dispatch_queue_create("com.aschuch.cache.diskQueue", DISPATCH_QUEUE_CONCURRENT)
+
+    /// Typealias to define the reusability in declaration of the closures.
+    public typealias CacheBlockClosure = (T, CacheExpiry) -> Void
+    public typealias ErrorClosure = (NSError?) -> Void
 	
 	// MARK: Initializers
-	
-	/// Designated initializer.
-	///
-	/// - parameter name: Name of this cache
-	///	- parameter directory:  Objects in this cache are persisted to this directory.
-	///                         If no directory is specified, a new directory is created in the system's Caches directory
-	///
-	///  - returns:	A new cache with the given name and directory
-	public init(name: String, directory: NSURL?) throws {
-		self.name = name
-		cache.name = name
-		
-		if let d = directory {
-			cacheDirectory = d
-		} else {
+
+    /// Designated initializer.
+    ///
+    /// - parameter name: Name of this cache
+    ///	- parameter directory:  Objects in this cache are persisted to this directory.
+    ///                         If no directory is specified, a new directory is created in the system's Caches directory
+    /// - parameter fileProtection: Needs to be a valid value for `NSFileProtectionKey` (i.e. `NSFileProtectionNone`) and 
+    ///                             adds the given value as an NSFileManager attribute.
+    ///
+    ///  - returns:	A new cache with the given name and directory
+    public init(name: String, directory: NSURL?, fileProtection: String? = nil) throws {
+        self.name = name
+        cache.name = name
+
+        if let d = directory {
+            cacheDirectory = d
+        } else {
             let url = NSFileManager.defaultManager().URLsForDirectory(.CachesDirectory, inDomains: .UserDomainMask).first!
-			cacheDirectory = url.URLByAppendingPathComponent("com.aschuch.cache/\(name)")
-		}
-		
-		// Create directory on disk if needed
+            cacheDirectory = url.URLByAppendingPathComponent("com.aschuch.cache/\(name)")
+        }
+
+        // Create directory on disk if needed
         try fileManager.createDirectoryAtURL(cacheDirectory, withIntermediateDirectories: true, attributes: nil)
-	}
+
+        if let fileProtection = fileProtection {
+            // Set the correct NSFileProtectionKey
+            let protection = [NSFileProtectionKey: fileProtection]
+            try fileManager.setAttributes(protection, ofItemAtPath: cacheDirectory.path!)
+        }
+    }
 	
     /// Convenience Initializer
     ///
@@ -59,37 +71,37 @@ public class Cache<T: NSCoding> {
 	
 	
 	// MARK: Awesome caching
-	
-	/// Returns a cached object immediately or evaluates a cacheBlock.
+
+    /// Returns a cached object immediately or evaluates a cacheBlock.
     /// The cacheBlock will not be re-evaluated until the object is expired or manually deleted.
-	/// If the cache already contains an object, the completion block is called with the cached object immediately.
+    /// If the cache already contains an object, the completion block is called with the cached object immediately.
     ///
-	/// If no object is found or the cached object is already expired, the `cacheBlock` is called.
-	/// You might perform any tasks (e.g. network calls) within this block. Upon completion of these tasks, 
+    /// If no object is found or the cached object is already expired, the `cacheBlock` is called.
+    /// You might perform any tasks (e.g. network calls) within this block. Upon completion of these tasks,
     /// make sure to call the `success` or `failure` block that is passed to the `cacheBlock`.
-	/// The completion block is invoked as soon as the cacheBlock is finished and the object is cached.
-	///
-	/// - parameter key:			The key to lookup the cached object
-	/// - parameter cacheBlock:	This block gets called if there is no cached object or the cached object is already expired.
-	///                         The supplied success or failure blocks must be called upon completion.
-	///                         If the error block is called, the object is not cached and the completion block is invoked with this error.
+    /// The completion block is invoked as soon as the cacheBlock is finished and the object is cached.
+    ///
+    /// - parameter key:			The key to lookup the cached object
+    /// - parameter cacheBlock:	This block gets called if there is no cached object or the cached object is already expired.
+    ///                         The supplied success or failure blocks must be called upon completion.
+    ///                         If the error block is called, the object is not cached and the completion block is invoked with this error.
     /// - parameter completion: Called as soon as a cached object is available to use. The second parameter is true if the object was already cached.
-	public func setObjectForKey(key: String, cacheBlock: ((T, CacheExpiry) -> (), (NSError?) -> ()) -> (), completion: (T?, Bool, NSError?) -> ()) {
-		if let object = objectForKey(key) {
-			completion(object, true, nil)
-		} else {
-			let successBlock: (T, CacheExpiry) -> () = { (obj, expires) in
-				self.setObject(obj, forKey: key, expires: expires)
-				completion(obj, false, nil)
-			}
-			
-			let failureBlock: (NSError?) -> () = { (error) in
-				completion(nil, false, error)
-			}
-			
-			cacheBlock(successBlock, failureBlock)
-		}
-	}
+    public func setObjectForKey(key: String, cacheBlock: (CacheBlockClosure, ErrorClosure) -> Void, completion: (T?, Bool, NSError?) -> Void) {
+        if let object = objectForKey(key) {
+            completion(object, true, nil)
+        } else {
+            let successBlock: CacheBlockClosure = { (obj, expires) in
+                self.setObject(obj, forKey: key, expires: expires)
+                completion(obj, false, nil)
+            }
+
+            let failureBlock: ErrorClosure = { (error) in
+                completion(nil, false, error)
+            }
+
+            cacheBlock(successBlock, failureBlock)
+        }
+    }
 	
 	  // MARK: Dictionary functions
 
@@ -140,7 +152,7 @@ public class Cache<T: NSCoding> {
 		
 		if possibleObject == nil {
 			// Try to load object from disk (synchronously)
-			dispatch_sync(diskReadQueue) {
+			dispatch_sync(queue) {
 				let path = self.urlForKey(key).path!
 				if self.fileManager.fileExistsAtPath(path) {
 					possibleObject = NSKeyedUnarchiver.unarchiveObjectWithFile(path) as? CacheObject
@@ -183,7 +195,7 @@ public class Cache<T: NSCoding> {
         cache.setObject(cacheObject, forKey: key)
         
         // Write object to disk (asyncronously)
-        dispatch_async(diskWriteQueue) {
+        dispatch_async(queue) {
             let path = self.urlForKey(key).path!
             NSKeyedArchiver.archiveRootObject(cacheObject, toFile: path)
             completion()
@@ -199,7 +211,7 @@ public class Cache<T: NSCoding> {
 	public func removeObjectForKey(key: String) {
 		cache.removeObjectForKey(key)
 		
-		dispatch_async(diskWriteQueue) {
+		dispatch_async(queue) {
 			let url = self.urlForKey(key)
 			do {
 				try self.fileManager.removeItemAtURL(url)
@@ -213,7 +225,7 @@ public class Cache<T: NSCoding> {
 	public func removeAllObjects(completion: (() -> Void)? = nil) {
 		cache.removeAllObjects()
 		
-		dispatch_async(diskWriteQueue) {
+		dispatch_async(queue) {
             let keys = self.allKeys()
 			
             for key in keys {
@@ -234,7 +246,7 @@ public class Cache<T: NSCoding> {
 	
 	/// Removes all expired objects from the cache.
 	public func removeExpiredObjects() {
-		dispatch_async(diskWriteQueue) {
+		dispatch_async(queue) {
             let keys = self.allKeys()
 			
 			for key in keys {
